@@ -1,7 +1,7 @@
 import getpass, os, json
 username = getpass.getuser()
 
-dbpath = "C:\\Users\\%s\AppData\\Roaming\\ai_client\\Local Storage" % username
+dbpath = r"C:\Users\%s\AppData\Roaming\ai_client\Local Storage" % username
 
 def get_all_files():
     file_list = []
