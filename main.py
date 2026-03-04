@@ -133,26 +133,23 @@ for bh in bh_list:
     out_file = os.path.join(out_dir, filename)
     print(f"\n即将下载到：{out_file}")
     
-    # 获取鉴权视频链接 (playRecord API)
-    play_url = "https://www.aiwenyun.cn/liveclassgo/api/v1/history/playRecord"
-    play_headers = {
-        "host": "www.aiwenyun.cn",
+    # 获取鉴权视频链接 (通过获取带签名的 info.plist 地址来提取 STS Token)
+    location = info[str(bh)]["addr"].split("/ts1/t.m3u8")[0].replace("https://filecdn.plaso.cn/liveclass/plaso/", "")
+    plist_url = f"https://filecdn.plaso.cn/liveclass/plaso/{location}/info.plist"
+    
+    # 构造请求头突破阿里云 OSS 的拦截机制
+    headers = {
         "user-agent": UA,
-        "platform": "ai",
-        "access-token": access_token,
-        "content-type": "application/json"
+        "Referer": "https://www.aiwenyun.cn/"
     }
-    play_payload = {"recordId": info[str(bh)]["_id"]}
     
     try:
-        r = requests.post(play_url, headers=play_headers, json=play_payload, verify=False)
-        r_json = r.json()
-        if r_json.get("code") == 0 and "playUrl" in r_json.get("obj", {}):
-            real_m3u8 = r_json["obj"]["playUrl"]
-            print(f"获取到动态下载地址: {real_m3u8.split('?')[0]}...")
-        else:
-            print(f"未能获取动态地址: {r.text}")
-            real_m3u8 = info[str(bh)]["addr"] # fallback
+        # 发送请求获取 302 跳转后带所有 STS 签名的真实地址
+        r = requests.get(plist_url, headers=headers, allow_redirects=True, verify=False)
+        signed_plist_url = r.url
+        # 把 info.plist 替换成我们要下载的 ts1/t.m3u8，保留后面的所有 ?x-oss-... 签名参数
+        real_m3u8 = signed_plist_url.replace("info.plist", "ts1/t.m3u8")
+        print(f"获取到动态下载签名: {real_m3u8.split('?')[1][:30]}...")
             
     except Exception as e:
         print(f"请求鉴权地址失败: {e}")
