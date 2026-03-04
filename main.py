@@ -192,20 +192,24 @@ for bh in bh_list:
             print("同时为您自动提取课件 PDF 和背景图以便本地查阅。")
             print("===========================================================\n")
             
-            # 扫描并下载当堂课的 PDF 和 PNG 资源
-            res_matches = set(re.findall(r'\"([a-zA-Z0-9_\-\.\/]+\.(?:pdf|png|jpg))\"', str_data))
+            # 扫描并下载当堂课的 PDF 和 PNG/JPG 资源
+            # 放宽正则以支持提取中文字符文件名的课件
+            res_matches = set(re.findall(r'\"([^\"]+\.(?:pdf|png|jpg))\"', str_data))
             if res_matches:
                 base_addr = info[str(bh)]["addr"].split("/ts1")[0]
                 print("发现附带课件/板书资源，正在下载...")
                 
                 async def fetch_all_resources():
                     import asyncio
+                    import urllib.parse
                     tasks = []
                     for m in res_matches:
-                        # 清理可能的前导斜杠
                         clean_path = m.lstrip("/")
-                        if "http" in clean_path: continue # 跳过绝对外链
-                        file_url = base_addr + "/" + clean_path
+                        if "http" in clean_path: continue
+                        
+                        # 对于带有中文名称的资源必须进行 URL 编码才能通过 OSS HTTP 下载
+                        encoded_path = urllib.parse.quote(clean_path)
+                        file_url = base_addr + "/" + encoded_path
                         file_name = clean_path.split("/")[-1]
                         dest_path = os.path.join(out_dir, file_name)
                         tasks.append(download_resource(file_url, dest_path, oss_auth))
