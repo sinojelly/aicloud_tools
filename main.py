@@ -13,6 +13,22 @@ def timestamp_to_date(timestamp):
     dt_str = dt.strftime('%Y-%m-%d')
     return dt_str
 
+async def download_resource(url, dest_path, oss_auth):
+    from m3u8_to_mp4 import get_oss_headers
+    import aiohttp
+    import aiofiles
+    headers = get_oss_headers(url, oss_auth)
+    # 不强制校验后缀以防下载被拦截，但需要加入基础安全头
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, ssl=False) as response:
+            if response.status == 200:
+                async with aiofiles.open(dest_path, 'wb') as f:
+                    async for chunk in response.content.iter_chunked(1024 * 1024):
+                        await f.write(chunk)
+                print(f"资源下载成功: {os.path.basename(dest_path)}")
+            else:
+                print(f"资源下载失败 HTTP {response.status}: {os.path.basename(dest_path)}")
+
 def expand_range_string(s):
     expanded = []
     parts = s.split(',')
@@ -173,8 +189,34 @@ for bh in bh_list:
             print("爱问云底层的录制机制仅保存了【语音流】与极小的【画笔坐标点】，从未在云端合成过任何视频。")
             print("这并非下载器故障，而是物理源文件不存在。")
             print("目前脚本将自动为您提取并合并全场纯音频（最终生成的 MP4 仅有声音无画面属正常现象）。")
+            print("同时为您自动提取课件 PDF 和背景图以便本地查阅。")
             print("===========================================================\n")
             
+            # 扫描并下载当堂课的 PDF 和 PNG 资源
+            res_matches = set(re.findall(r'\"([a-zA-Z0-9_\-\.\/]+\.(?:pdf|png|jpg))\"', str_data))
+            if res_matches:
+                base_addr = info[str(bh)]["addr"].split("/ts1")[0]
+                print("发现附带课件/板书资源，正在下载...")
+                
+                async def fetch_all_resources():
+                    import asyncio
+                    tasks = []
+                    for m in res_matches:
+                        # 清理可能的前导斜杠
+                        clean_path = m.lstrip("/")
+                        if "http" in clean_path: continue # 跳过绝对外链
+                        file_url = base_addr + "/" + clean_path
+                        file_name = clean_path.split("/")[-1]
+                        dest_path = os.path.join(out_dir, file_name)
+                        tasks.append(download_resource(file_url, dest_path, oss_auth))
+                    if tasks:
+                        await asyncio.gather(*tasks)
+                        
+                try:
+                    asyncio.run(fetch_all_resources())
+                except Exception as ex:
+                    print(f"附加课件资源下载异常：{ex}")
+
             # 回退去抓取音频流 a1, a2 ...
             vs = list(set(re.findall(r'a\d+/a\.m3u8', str_data)))
             vs.sort(key=lambda x: int(re.search(r'\d+', x).group()))
