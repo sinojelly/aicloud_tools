@@ -54,7 +54,7 @@ async def load_m3u8(s, m3u8_url, oss_auth):
         return m3u8.loads(text, uri=m3u8_url)
 
 
-async def fetch(s, index, segment, oss_auth):
+async def fetch(s, index, segment, oss_auth, ts_dir="ts"):
     ts_name = f'{index}.ts'
     fetch_url = segment.absolute_uri
     headers = get_oss_headers(fetch_url, oss_auth)
@@ -62,28 +62,28 @@ async def fetch(s, index, segment, oss_auth):
     async with s.get(fetch_url, headers=headers) as r:
         if r.status != 200:
             raise Exception(f"Failed to fetch TS {ts_name} from {fetch_url}: HTTP {r.status}")
-        with open(f'ts/{ts_name}', 'wb') as f:
+        with open(f'{ts_dir}/{ts_name}', 'wb') as f:
             async for chunk in r.content.iter_chunked(64 * 1024):
                 f.write(chunk)
 
 
-async def download_ts(s, playlist, oss_auth):
-    Path('ts').mkdir(exist_ok=True)
-    tasks = (fetch(s, index, segment, oss_auth) for index, segment in enumerate(playlist.segments))
+async def download_ts(s, playlist, oss_auth, ts_dir="ts"):
+    Path(ts_dir).mkdir(exist_ok=True)
+    tasks = (fetch(s, index, segment, oss_auth, ts_dir) for index, segment in enumerate(playlist.segments))
     await tqdm_asyncio.gather(*tasks)
 
 
-def new_m3u8(playlist):
+def new_m3u8(playlist, ts_dir="ts", out_name="new.m3u8"):
     for index, segment in enumerate(playlist.segments):
-        segment.uri = f"ts/{index}.ts"
-    playlist.dump('new.m3u8')
+        segment.uri = f"{ts_dir}/{index}.ts"
+    playlist.dump(out_name)
 
 
-def m3u82mp4(capture_output=False, mp4_path='output.mp4'):
+def m3u82mp4(m3u8_path='new.m3u8', capture_output=False, mp4_path='output.mp4'):
     try:
         subprocess.run(['./ffmpeg.exe',
                         '-allowed_extensions', 'ALL',
-                        '-i', 'new.m3u8',
+                        '-i', m3u8_path,
                         '-c', 'copy',
                         mp4_path
                         ], check=True, capture_output=capture_output)
@@ -93,25 +93,45 @@ def m3u82mp4(capture_output=False, mp4_path='output.mp4'):
         raise
 
 
-def clean_up():
-    for ts_file in Path('ts').iterdir():
-        ts_file.unlink()
-    Path('ts').rmdir()
-    Path('new.m3u8').unlink()
-
-
-async def mainfunc(m3u8_url, mp4path, oss_auth=None):
+async def mainfunc(m3u8_urls, mp4path, oss_auth=None):
+    if isinstance(m3u8_urls, str):
+        m3u8_urls = [m3u8_urls]
+        
     connector = aiohttp.TCPConnector(limit=8)
+    part_files = []
     
     async with aiohttp.ClientSession(connector=connector) as s:
-        print(f'正在读取m3u8链接：{m3u8_url}')
-        playlist = await load_m3u8(s, m3u8_url, oss_auth)
-        # logging.info('正在下载ts文件')
-        await download_ts(s, playlist, oss_auth)
+        for idx, m3u8_url in enumerate(m3u8_urls):
+            print(f'正在读取切片 [{idx+1}/{len(m3u8_urls)}]：{m3u8_url}')
+            playlist = await load_m3u8(s, m3u8_url, oss_auth)
+            
+            ts_dir = f'ts_{idx}'
+            await download_ts(s, playlist, oss_auth, ts_dir)
+            
+            out_m3u8 = f'new_{idx}.m3u8'
+            new_m3u8(playlist, ts_dir, out_m3u8)
+            
+            out_mp4 = f'part_{idx}.mp4'
+            m3u82mp4(out_m3u8, capture_output=False, mp4_path=out_mp4)
+            part_files.append(out_mp4)
+            
+    if len(part_files) == 1:
+        import shutil
+        shutil.move(part_files[0], mp4path)
+    else:
+        print("正在拼接多个视频分段...")
+        with open('concat_list.txt', 'w', encoding='utf-8') as f:
+            for pf in part_files:
+                f.write(f"file '{pf}'\n")
+        subprocess.run(['./ffmpeg.exe', '-f', 'concat', '-safe', '0', '-i', 'concat_list.txt', '-c', 'copy', mp4path], check=True)
+        Path('concat_list.txt').unlink(missing_ok=True)
         
-    # logging.info('正在生成新的m3u8文件')
-    new_m3u8(playlist)
-    # logging.info('正在转换新的m3u8文件为mp4文件')
-    m3u82mp4(mp4_path=mp4path)
-    # logging.info('正在清理临时文件')
-    clean_up()
+    # 清理所有临时文件
+    for idx, pf in enumerate(part_files):
+        Path(pf).unlink(missing_ok=True)
+        ts_dir = Path(f'ts_{idx}')
+        if ts_dir.exists():
+            for ts_file in ts_dir.iterdir():
+                ts_file.unlink(missing_ok=True)
+            ts_dir.rmdir()
+        Path(f'new_{idx}.m3u8').unlink(missing_ok=True)

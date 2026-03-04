@@ -152,19 +152,34 @@ for bh in bh_list:
     except Exception as e:
         print(f"获取 STS 鉴权异常: {e}")
 
-    # 替换原本的 ts1/t.m3u8 为真实存在的 s1/a.m3u8 (视频画面流)
-    real_m3u8 = info[str(bh)]["addr"].replace("ts1/t.m3u8", "s1/a.m3u8")
+    plist_url = "https://filecdn.plaso.cn/liveclass/plaso/" + info[str(bh)]["addr"].split("liveclass/plaso/")[1].split("/ts1")[0] + "/info.plist"
     
+    real_urls = []
+    from m3u8_to_mp4 import get_oss_headers
     try:
-        asyncio.run(mainfunc(real_m3u8, out_file, oss_auth=oss_auth))
+        r_plist = requests.get(plist_url, headers=get_oss_headers(plist_url, oss_auth), verify=False)
+        plist_data = r_plist.json()
+        import re
+        str_data = json.dumps(plist_data)
+        # 获取所有 s*/a.m3u8 画面切片
+        vs = list(set(re.findall(r's\d+/a\.m3u8', str_data)))
+        # 按数字顺序排序 s1, s101, s102
+        vs.sort(key=lambda x: int(re.search(r'\d+', x).group()))
+        if not vs:
+            print("未找到画面流，尝试提取音频流...")
+            vs = list(set(re.findall(r'a\d+/a\.m3u8', str_data)))
+            vs.sort(key=lambda x: int(re.search(r'\d+', x).group()))
+            
+        real_urls = [info[str(bh)]["addr"].split("/ts1")[0] + "/" + v for v in vs]
     except Exception as e:
-        print(f"画面流下载异常...({e})")
-        try:
-            # 尝试备用音频流 a1/a.m3u8
-            audio_m3u8 = info[str(bh)]["addr"].replace("ts1/t.m3u8", "a1/a.m3u8")
-            print("尝试下载备用流...")
-            asyncio.run(mainfunc(audio_m3u8, out_file, oss_auth=oss_auth))
-        except Exception as ex:
-            print(f"{info[str(bh)]['classname']} {info[str(bh)]['classdate']} 下载出错：{ex}\n请稍后重试或手动操作。")
+        print(f"解析 info.plist 分片失败，降级为默认画面: {e}")
+        
+    if not real_urls:
+        real_urls = [info[str(bh)]["addr"].replace("ts1/t.m3u8", "s1/a.m3u8")]
+
+    try:
+        asyncio.run(mainfunc(real_urls, out_file, oss_auth=oss_auth))
+    except Exception as e:
+        print(f"{info[str(bh)]['classname']} {info[str(bh)]['classdate']} 下载出错：{e}\n请稍后重试或手动操作。")
 
 print(f"\n视频转换完成，请到指定目录 [{path}] 查看。\n感谢您的使用！")
