@@ -7,7 +7,7 @@ def get_all_files():
     file_list = []
     for root, _, files in os.walk(dbpath):
         for file in files:
-            if file.endswith(".ldb"):
+            if file.endswith(".log"):
                 file_list.append(os.path.join(root, file))
     return file_list
 
