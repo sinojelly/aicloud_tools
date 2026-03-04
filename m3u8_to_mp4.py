@@ -82,6 +82,7 @@ def new_m3u8(playlist, ts_dir="ts", out_name="new.m3u8"):
 def m3u82mp4(m3u8_path='new.m3u8', capture_output=False, mp4_path='output.mp4'):
     try:
         subprocess.run(['./ffmpeg.exe',
+                        '-y',
                         '-allowed_extensions', 'ALL',
                         '-i', m3u8_path,
                         '-c', 'copy',
@@ -94,44 +95,86 @@ def m3u82mp4(m3u8_path='new.m3u8', capture_output=False, mp4_path='output.mp4'):
 
 
 async def mainfunc(m3u8_urls, mp4path, oss_auth=None):
+    import uuid
+    import time
+    uid = uuid.uuid4().hex[:8]
+    
     if isinstance(m3u8_urls, str):
         m3u8_urls = [m3u8_urls]
         
     connector = aiohttp.TCPConnector(limit=8)
     part_files = []
+    ts_dirs = []
+    m3u8_files = []
     
     async with aiohttp.ClientSession(connector=connector) as s:
         for idx, m3u8_url in enumerate(m3u8_urls):
             print(f'正在读取切片 [{idx+1}/{len(m3u8_urls)}]：{m3u8_url}')
             playlist = await load_m3u8(s, m3u8_url, oss_auth)
             
-            ts_dir = f'ts_{idx}'
+            ts_dir = f'ts_{uid}_{idx}'
             await download_ts(s, playlist, oss_auth, ts_dir)
             
-            out_m3u8 = f'new_{idx}.m3u8'
+            out_m3u8 = f'new_{uid}_{idx}.m3u8'
             new_m3u8(playlist, ts_dir, out_m3u8)
             
-            out_mp4 = f'part_{idx}.mp4'
+            out_mp4 = f'part_{uid}_{idx}.mp4'
             m3u82mp4(out_m3u8, capture_output=False, mp4_path=out_mp4)
-            part_files.append(out_mp4)
             
+            part_files.append(out_mp4)
+            ts_dirs.append(ts_dir)
+            m3u8_files.append(out_m3u8)
+            
+    # 等待一秒以彻底释放文件锁（杀毒软件扫描等）
+    time.sleep(1)
+    
+    concat_list = f'concat_list_{uid}.txt'
     if len(part_files) == 1:
         import shutil
-        shutil.move(part_files[0], mp4path)
+        if Path(mp4path).exists():
+            try:
+                Path(mp4path).unlink()
+            except Exception:
+                pass
+        
+        # 带有重试逻辑的移动文件，防止偶发的 WinError 32
+        for _ in range(5):
+            try:
+                shutil.move(part_files[0], mp4path)
+                break
+            except Exception as e:
+                time.sleep(1)
     else:
         print("正在拼接多个视频分段...")
-        with open('concat_list.txt', 'w', encoding='utf-8') as f:
+        with open(concat_list, 'w', encoding='utf-8') as f:
             for pf in part_files:
                 f.write(f"file '{pf}'\n")
-        subprocess.run(['./ffmpeg.exe', '-f', 'concat', '-safe', '0', '-i', 'concat_list.txt', '-c', 'copy', mp4path], check=True)
-        Path('concat_list.txt').unlink(missing_ok=True)
+        subprocess.run(['./ffmpeg.exe', '-y', '-f', 'concat', '-safe', '0', '-i', concat_list, '-c', 'copy', mp4path], check=True)
+        try:
+            Path(concat_list).unlink(missing_ok=True)
+        except Exception:
+            pass
         
     # 清理所有临时文件
-    for idx, pf in enumerate(part_files):
-        Path(pf).unlink(missing_ok=True)
-        ts_dir = Path(f'ts_{idx}')
-        if ts_dir.exists():
-            for ts_file in ts_dir.iterdir():
-                ts_file.unlink(missing_ok=True)
-            ts_dir.rmdir()
-        Path(f'new_{idx}.m3u8').unlink(missing_ok=True)
+    for pf in part_files:
+        try:
+            Path(pf).unlink(missing_ok=True)
+        except Exception:
+            pass
+    for td_str in ts_dirs:
+        td = Path(td_str)
+        if td.exists():
+            for ts_file in td.iterdir():
+                try:
+                    ts_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            try:
+                td.rmdir()
+            except Exception:
+                pass
+    for mf in m3u8_files:
+        try:
+            Path(mf).unlink(missing_ok=True)
+        except Exception:
+            pass
