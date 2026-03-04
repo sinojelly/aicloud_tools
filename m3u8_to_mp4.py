@@ -4,10 +4,48 @@ from pathlib import Path
 import m3u8
 import aiohttp
 from tqdm.asyncio import tqdm_asyncio
+import base64
+import hmac
+import hashlib
+from email.utils import formatdate
+from urllib.parse import urlparse
+
+def get_oss_headers(url, oss_auth):
+    """根据阿里云 OSS V1 计算当前请求的签名并返回 Headers"""
+    if not oss_auth:
+        return {
+            "user-agent": "Mozilla/5.0",
+            "Referer": "https://www.aiwenyun.cn/"
+        }
+    
+    ak_id = oss_auth['id']
+    ak_secret = oss_auth['secret']
+    sts_token = oss_auth['token']
+    
+    parsed = urlparse(url)
+    bucket = "file-plaso" # 爱问云目前的 bucket
+    object_key = parsed.path.lstrip('/')
+    
+    date_str = formatdate(timeval=None, localtime=False, usegmt=True)
+    oss_headers = f"x-oss-security-token:{sts_token}\n"
+    resource = f"/{bucket}/{object_key}"
+    
+    string_to_sign = f"GET\n\n\n{date_str}\n{oss_headers}{resource}"
+    h = hmac.new(ak_secret.encode('utf-8'), string_to_sign.encode('utf-8'), hashlib.sha1)
+    signature = base64.b64encode(h.digest()).decode('utf-8')
+    
+    return {
+        "Date": date_str,
+        "x-oss-security-token": sts_token,
+        "Authorization": f"OSS {ak_id}:{signature}",
+        "user-agent": "Mozilla/5.0",
+        "Referer": "https://www.aiwenyun.cn/"
+    }
 
 
-async def load_m3u8(s, m3u8_url):
-    async with s.get(m3u8_url) as r:
+async def load_m3u8(s, m3u8_url, oss_auth):
+    headers = get_oss_headers(m3u8_url, oss_auth)
+    async with s.get(m3u8_url, headers=headers) as r:
         text = await r.text()
         if r.status != 200:
             raise Exception(f"Failed to load M3U8: HTTP {r.status}\n{text[:500]}")
@@ -16,26 +54,22 @@ async def load_m3u8(s, m3u8_url):
         return m3u8.loads(text, uri=m3u8_url)
 
 
-async def fetch(s, index, segment, m3u8_query=""):
+async def fetch(s, index, segment, oss_auth):
     ts_name = f'{index}.ts'
-    with open(f'ts/{ts_name}', 'wb') as f:
-        # 补全 STS 签名参数
-        fetch_url = segment.absolute_uri
-        if m3u8_query and "?" not in fetch_url:
-            fetch_url += "?" + m3u8_query
-        elif m3u8_query and "?" in fetch_url:
-            fetch_url += "&" + m3u8_query
+    fetch_url = segment.absolute_uri
+    headers = get_oss_headers(fetch_url, oss_auth)
 
-        async with s.get(fetch_url) as r:
-            if r.status != 200:
-                raise Exception(f"Failed to fetch TS {ts_name} from {fetch_url}: HTTP {r.status}")
+    async with s.get(fetch_url, headers=headers) as r:
+        if r.status != 200:
+            raise Exception(f"Failed to fetch TS {ts_name} from {fetch_url}: HTTP {r.status}")
+        with open(f'ts/{ts_name}', 'wb') as f:
             async for chunk in r.content.iter_chunked(64 * 1024):
                 f.write(chunk)
 
 
-async def download_ts(s, playlist, m3u8_query=""):
+async def download_ts(s, playlist, oss_auth):
     Path('ts').mkdir(exist_ok=True)
-    tasks = (fetch(s, index, segment, m3u8_query) for index, segment in enumerate(playlist.segments))
+    tasks = (fetch(s, index, segment, oss_auth) for index, segment in enumerate(playlist.segments))
     await tqdm_asyncio.gather(*tasks)
 
 
@@ -66,19 +100,15 @@ def clean_up():
     Path('new.m3u8').unlink()
 
 
-import urllib.parse
-
-async def mainfunc(m3u8_url, mp4path, headers=None):
+async def mainfunc(m3u8_url, mp4path, oss_auth=None):
     connector = aiohttp.TCPConnector(limit=8)
     
-    # 解析出 STS 签名参数，交给分片下载器
-    m3u8_query = urllib.parse.urlparse(m3u8_url).query
-    
-    async with aiohttp.ClientSession(connector=connector, headers=headers) as s:
+    async with aiohttp.ClientSession(connector=connector) as s:
         print(f'正在读取m3u8链接：{m3u8_url}')
-        playlist = await load_m3u8(s, m3u8_url)
+        playlist = await load_m3u8(s, m3u8_url, oss_auth)
         # logging.info('正在下载ts文件')
-        await download_ts(s, playlist, m3u8_query)
+        await download_ts(s, playlist, oss_auth)
+        
     # logging.info('正在生成新的m3u8文件')
     new_m3u8(playlist)
     # logging.info('正在转换新的m3u8文件为mp4文件')

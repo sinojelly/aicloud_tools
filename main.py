@@ -133,40 +133,37 @@ for bh in bh_list:
     out_file = os.path.join(out_dir, filename)
     print(f"\n即将下载到：{out_file}")
     
-    # 获取鉴权视频链接 (通过获取带签名的 info.plist 地址来提取 STS Token)
-    location = info[str(bh)]["addr"].split("/ts1/t.m3u8")[0].replace("https://filecdn.plaso.cn/liveclass/plaso/", "")
-    plist_url = f"https://filecdn.plaso.cn/liveclass/plaso/{location}/info.plist"
-    
-    # 构造请求头突破阿里云 OSS 的拦截机制
-    headers = {
+    sts_url = "https://www.aiwenyun.cn/yxt/servlet/stsHelper/stsInfo"
+    sts_headers = {
         "user-agent": UA,
-        "Referer": "https://www.aiwenyun.cn/"
+        "access-token": access_token,
+        "content-type": "application/json"
     }
     
+    oss_auth = None
     try:
-        # 发送请求获取 302 跳转后带所有 STS 签名的真实地址
-        r = requests.get(plist_url, headers=headers, allow_redirects=True, verify=False)
-        signed_plist_url = r.url
-        # 把 info.plist 替换成我们要下载的 ts1/t.m3u8，保留后面的所有 ?x-oss-... 签名参数
-        real_m3u8 = signed_plist_url.replace("info.plist", "ts1/t.m3u8")
-        print(f"获取到动态下载签名: {real_m3u8.split('?')[1][:30]}...")
-            
+        r_sts = requests.post(sts_url, headers=sts_headers, json={"id":"liveclass"}, verify=False)
+        sts_data = r_sts.json()
+        if sts_data.get("code") == 0:
+            oss_auth = sts_data.get("obj")
+            print("成功获取到 STS 动态鉴权密钥")
+        else:
+            print(f"获取 STS 鉴权失败: {sts_data}")
     except Exception as e:
-        print(f"请求鉴权地址失败: {e}")
-        real_m3u8 = info[str(bh)]["addr"] # fallback
+        print(f"获取 STS 鉴权异常: {e}")
 
-    # 构造请求头突破阿里云 OSS 的拦截机制
-    headers = {
-        "user-agent": UA,
-        "Referer": "https://www.aiwenyun.cn/"
-    }
+    # 替换原本的 ts1/t.m3u8 为真实存在的 s1/a.m3u8 (视频画面流)
+    real_m3u8 = info[str(bh)]["addr"].replace("ts1/t.m3u8", "s1/a.m3u8")
     
     try:
-        asyncio.run(mainfunc(real_m3u8, out_file, headers=headers))
+        asyncio.run(mainfunc(real_m3u8, out_file, oss_auth=oss_auth))
     except Exception as e:
-        print(f"尝试备用地址下载...({e})")
+        print(f"画面流下载异常...({e})")
         try:
-            asyncio.run(mainfunc(real_m3u8.replace("ts1","ts101"), out_file, headers=headers))
+            # 尝试备用音频流 a1/a.m3u8
+            audio_m3u8 = info[str(bh)]["addr"].replace("ts1/t.m3u8", "a1/a.m3u8")
+            print("尝试下载备用流...")
+            asyncio.run(mainfunc(audio_m3u8, out_file, oss_auth=oss_auth))
         except Exception as ex:
             print(f"{info[str(bh)]['classname']} {info[str(bh)]['classdate']} 下载出错：{ex}\n请稍后重试或手动操作。")
 
