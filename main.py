@@ -1,4 +1,4 @@
-import time, os, asyncio
+import time, os, asyncio, requests
 from datetime import datetime
 from get_userinfo import get_userinfo
 from get_video import getAccessToken, getRecordList, create_path, download_m3u8_segments
