@@ -176,7 +176,7 @@ for bh in bh_list:
         r_plist = requests.get(plist_url, headers=get_oss_headers(plist_url, oss_auth), verify=False)
         plist_data = r_plist.json()
         import re
-        str_data = json.dumps(plist_data)
+        str_data = json.dumps(plist_data, ensure_ascii=False)
         # 获取所有 s*/a.m3u8 画面切片
         vs = list(set(re.findall(r's\d+/a\.m3u8', str_data)))
         # 按数字顺序排序 s1, s101, s102

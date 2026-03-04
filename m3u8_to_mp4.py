@@ -8,7 +8,7 @@ import base64
 import hmac
 import hashlib
 from email.utils import formatdate
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 def get_oss_headers(url, oss_auth):
     """根据阿里云 OSS V1 计算当前请求的签名并返回 Headers"""
@@ -24,7 +24,7 @@ def get_oss_headers(url, oss_auth):
     
     parsed = urlparse(url)
     bucket = "file-plaso" # 爱问云目前的 bucket
-    object_key = parsed.path.lstrip('/')
+    object_key = unquote(parsed.path.lstrip('/'))
     
     date_str = formatdate(timeval=None, localtime=False, usegmt=True)
     oss_headers = f"x-oss-security-token:{sts_token}\n"
