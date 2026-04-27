@@ -11,6 +11,9 @@
 pip install -r requirements.txt
 ```
 
+Jelly Note:
+用法，安装依赖后， python main.py，弹出的console窗口输入爱问云账号、密码，即可列出历史课程，输入编号即可下载。
+
 ### 运行代理劫持服务
 要启动代理劫持服务，直接运行`package_interception.py`文件：
 ```sh

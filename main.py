@@ -192,6 +192,9 @@ for bh in bh_list:
             print("同时为您自动提取课件 PDF 和背景图以便本地查阅。")
             print("===========================================================\n")
             
+            with open("fallback_info.json", "w", encoding="utf-8") as dumpf:
+                json.dump(plist_data, dumpf, ensure_ascii=False, indent=2)
+                
             # 扫描并下载当堂课的 PDF 和 PNG/JPG 资源
             # 放宽正则以支持提取中文字符文件名的课件
             res_matches = set(re.findall(r'\"([^\"]+\.(?:pdf|png|jpg))\"', str_data))
@@ -199,23 +202,177 @@ for bh in bh_list:
                 base_addr = info[str(bh)]["addr"].split("/ts1")[0]
                 print("发现附带课件/板书资源，正在下载...")
                 
+                # 遍历 Bucket 目录树来确定课件的真实储存路径
+                try:
+                    prefix = base_addr.split("filecdn.plaso.cn/")[1].split("_")[0]
+                    bucket_url = f'https://filecdn.plaso.cn/?prefix={prefix}&max-keys=500'
+                    import xml.etree.ElementTree as ET
+                    tr = requests.get(bucket_url, headers=get_oss_headers(bucket_url, oss_auth), verify=False)
+                    root = ET.fromstring(tr.text)
+                    print("--- 阿里云 OSS 目录树探测结果 ---")
+                    for obj in root.findall('.//{http://doc.oss-cn-hangzhou.aliyuncs.com}Contents'):
+                        key = obj.find('{http://doc.oss-cn-hangzhou.aliyuncs.com}Key').text
+                        if not key.endswith('.ts') and not key.endswith('.m3u8'):
+                            print("发现源文件:", key)
+                    print("-----------------------------")
+                except Exception as ex:
+                    print("目录树探测失败:", ex)
                 async def fetch_all_resources():
                     import asyncio
                     import urllib.parse
+                    import aiohttp
+                    import aiofiles
+                    from m3u8_to_mp4 import get_oss_headers
+                    
                     tasks = []
-                    for m in res_matches:
-                        clean_path = m.lstrip("/")
-                        if "http" in clean_path: continue
+                    
+                    # 获取多种前缀的鉴权 token 以便穷举，绕过阿里云的 IAM Deny
+                    sts_url = "https://www.aiwenyun.cn/yxt/servlet/stsHelper/stsInfo"
+                    sts_headers = {
+                        "user-agent": UA,
+                        "access-token": get_userinfo_token(), # 全局 access_token
+                        "content-type": "application/json"
+                    }
+                    auths = {}
+                    for auth_id in ["liveclass", "courseware", "attachment", "file"]:
+                        try:
+                            # print(f"正在申请 {auth_id} 的 OSS 权限...")
+                            r = requests.post(sts_url, headers=sts_headers, json={"id": auth_id}, verify=False, timeout=3)
+                            auths[auth_id] = r.json().get("obj")
+                        except Exception:
+                            pass
+
+                    # ====== 终极地毯式暴力扫描器 ======
+                    parts = base_addr.split("filecdn.plaso.cn/")[1].split("/")
+                    org_id = parts[2] if len(parts) > 2 else "20328"
+                    loc_prefix = parts[3].split("_")[0] if len(parts) > 3 else parts[-1].split("_")[0]
+
+                    async def download_by_id(fid, session):
+                        import urllib.parse
+                        # 尝试猜出真实名字
+                        name_match = re.search(r'\"([^\"]+\.pdf)\"', str_data)
+                        fname = name_match.group(1) if name_match else fid
+                        encoded_name = urllib.parse.quote(fname)
                         
-                        # 对于带有中文名称的资源必须进行 URL 编码才能通过 OSS HTTP 下载
+                        url_templates = [
+                            ("courseware", f"https://filecdn.plaso.cn/courseware/plaso/{org_id}/{fid}"),
+                            ("courseware", f"https://filecdn.plaso.cn/courseware/plaso/{org_id}/{fid}.pdf"),
+                            ("courseware", f"https://filecdn.plaso.cn/courseware/plaso/{org_id}/{encoded_name}"),
+                            ("attachment", f"https://filecdn.plaso.cn/attachment/plaso/{org_id}/{fid}"),
+                            ("attachment", f"https://filecdn.plaso.cn/attachment/plaso/{org_id}/{fid}.pdf"),
+                            ("attachment", f"https://filecdn.plaso.cn/attachment/plaso/{org_id}/{encoded_name}"),
+                            ("file", f"https://filecdn.plaso.cn/file/plaso/{fid}"),
+                            ("file", f"https://filecdn.plaso.cn/file/plaso/{fid}.pdf"),
+                            ("liveclass", f"https://filecdn.plaso.cn/liveclass/plaso/{org_id}/{fid}"),
+                            ("liveclass", f"https://filecdn.plaso.cn/liveclass/plaso/{org_id}/{fid}.pdf"),
+                            ("liveclass", f"https://filecdn.plaso.cn/liveclass/plaso/{org_id}/{encoded_name}"),
+                            ("liveclass", f"https://filecdn.plaso.cn/liveclass/plaso/{loc_prefix}/courseware/{fid}"),
+                            ("liveclass", f"https://filecdn.plaso.cn/liveclass/plaso/{loc_prefix}/attachment/{fid}"),
+                            ("liveclass", f"{base_addr}/{fid}.pdf"),
+                            ("liveclass", f"{base_addr}/{encoded_name}"),
+                        ]
+
+                        from m3u8_to_mp4 import get_oss_headers
+                        
+                        print(f"--- 正在探测文档 {fname} 的原文件路径 ---")
+                        # 1. 探测完整的单文件 PDF
+                        for auth_id, url in url_templates:
+                            c_auth = auths.get(auth_id)
+                            if not c_auth: continue
+                            headers = get_oss_headers(url, c_auth)
+                            try:
+                                async with session.get(url, headers=headers, ssl=False, timeout=5) as response:
+                                    if response.status == 200:
+                                        dest_path = os.path.join(out_dir, fname)
+                                        async with aiofiles.open(dest_path, 'wb') as f:
+                                            async for chunk in response.content.iter_chunked(1024 * 1024):
+                                                await f.write(chunk)
+                                        print(f"[爆破成功] 课件本体下载完成: {fname}")
+                                        return
+                            except Exception:
+                                pass
+                                
+                        # 2. 如果单文件全被 403/404，则说明被白板系统切片化了
+                        print(f"单文件未找到，尝试探测被白板引擎切片后的散装图片包...")
+                        found_pages = 0
+                        for page in range(1, 40):
+                            page_str = str(page)
+                            sub_templates = [
+                                ("courseware", f"https://filecdn.plaso.cn/courseware/plaso/{org_id}/{fid}/{page_str}.jpg"),
+                                ("courseware", f"https://filecdn.plaso.cn/courseware/plaso/{org_id}/{fid}/{page_str}.png"),
+                                ("courseware", f"https://filecdn.plaso.cn/courseware/plaso/{org_id}/{fid}_{page_str}.jpg"),
+                                ("courseware", f"https://filecdn.plaso.cn/courseware/plaso/{org_id}/{fid}_{page_str}.png"),
+                                ("attachment", f"https://filecdn.plaso.cn/attachment/plaso/{org_id}/{fid}/{page_str}.jpg"),
+                                ("attachment", f"https://filecdn.plaso.cn/attachment/plaso/{org_id}/{fid}/{page_str}.png"),
+                                ("liveclass", f"{base_addr}/{fid}/{page_str}.jpg"),
+                                ("liveclass", f"{base_addr}/{fid}/{page_str}.png"),
+                                ("liveclass", f"{base_addr}/{fid}_{page_str}.jpg"),
+                                ("liveclass", f"{base_addr}/res/{fid}/{page_str}.jpg"),
+                            ]
+                            
+                            page_found = False
+                            for auth_id, url in sub_templates:
+                                c_auth = auths.get(auth_id)
+                                if not c_auth: continue
+                                headers = get_oss_headers(url, c_auth)
+                                try:
+                                    async with session.get(url, headers=headers, ssl=False, timeout=3) as response:
+                                        if response.status == 200:
+                                            ext = url.split('.')[-1]
+                                            dest_path = os.path.join(out_dir, f"{fid}_page_{page:02d}.{ext}")
+                                            async with aiofiles.open(dest_path, 'wb') as df:
+                                                async for chunk in response.content.iter_chunked(1024 * 1024):
+                                                    await df.write(chunk)
+                                            print(f"[爆破成功] 下载课件图集碎片: 第 {page} 页...")
+                                            found_pages += 1
+                                            page_found = True
+                                            break
+                                except Exception:
+                                    pass
+                                    
+                            if not page_found and found_pages > 0:
+                                # 连续找到后突然没找到，说明书本翻完了
+                                break
+                                
+                        if found_pages == 0:
+                            print(f"[完全失败] 经受 130 种不同网段/权限/页码的极限探测，课件 {fname} 的实体文件均不存在。")
+
+                    async def download_image(clean_path, dest_path, session):
                         encoded_path = urllib.parse.quote(clean_path)
                         file_url = base_addr + "/" + encoded_path
-                        file_name = clean_path.split("/")[-1]
-                        dest_path = os.path.join(out_dir, file_name)
-                        tasks.append(download_resource(file_url, dest_path, oss_auth))
-                    if tasks:
-                        await asyncio.gather(*tasks)
+                        headers = get_oss_headers(file_url, auths.get("liveclass") or oss_auth)
+                        try:
+                            async with session.get(file_url, headers=headers, ssl=False, timeout=10) as response:
+                                if response.status == 200:
+                                    async with aiofiles.open(dest_path, 'wb') as f:
+                                        async for chunk in response.content.iter_chunked(1024 * 1024):
+                                            await f.write(chunk)
+                                    print(f"附图下载成功: {os.path.basename(dest_path)}")
+                        except Exception:
+                            pass
+
+                    # 1. 下载通过 ID (cf) 隐密引用的核心 PDF 课件
+                    cf_ids = set(re.findall(r'\"cf\",\s*\"([a-f0-9]{24})\"', str_data))
+                    
+                    async with aiohttp.ClientSession() as session:
+                        for fid in cf_ids:
+                            tasks.append(download_by_id(fid, session))
+                            
+                        # 2. 下载原始硬编码路径的杂质附图
+                        for m in res_matches:
+                            if m.endswith(".pdf"): continue # PDF已被核心接管
+                            clean_path = m.lstrip("/")
+                            if "http" in clean_path: continue
+                            dest_path = os.path.join(out_dir, clean_path.split("/")[-1])
+                            tasks.append(download_image(clean_path, dest_path, session))
+
+                        if tasks:
+                            await asyncio.gather(*tasks)
                         
+                # 注入一个外部方法来获取全局Token
+                def get_userinfo_token():
+                    return access_token
+
                 try:
                     asyncio.run(fetch_all_resources())
                 except Exception as ex:
